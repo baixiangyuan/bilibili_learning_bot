@@ -13232,124 +13232,141 @@ AI判断: {thought}
             if auto_allow_tools:
                 print(f"{Fore.CYAN}[Agent] 检测到意图关键词，自动放行工具: {', '.join(auto_allow_tools)}{Style.RESET_ALL}")
 
-        # 调用AI
-        print(f"{Fore.CYAN}[Agent] AI思考中...{Style.RESET_ALL}")
-        try:
-            resp = await brain._call_ai_with_retry(
-                model=MODEL_BRAIN,
-                messages=messages,
-                request_timeout=90
-            )
-            ai_text = resp.choices[0].message.content
-        except Exception as e:
-            print(f"{Fore.RED}[Agent] AI调用失败: {e}{Style.RESET_ALL}")
-            continue
+        # 内层自动连续循环：AI调用 → 工具执行 → 自动继续（无需等用户输入）
+        sub_turn = 0
+        MAX_SUB_TURNS = 10  # 单次用户输入最多自动连续10轮
+        task_done = False
 
-        messages.append({"role": "assistant", "content": ai_text})
+        while sub_turn < MAX_SUB_TURNS:
+            sub_turn += 1
 
-        # 解析AI回复中的工具调用
-        tool_pattern = re.compile(r'\[TOOL:(\w+)\]\s*(.*?)(?=\[TOOL:|\[DONE\]|$)', re.DOTALL)
-        stop_pattern = re.compile(r'\[DONE\]')
+            # 调用AI
+            print(f"{Fore.CYAN}[Agent] AI思考中...{Style.RESET_ALL}")
+            try:
+                resp = await brain._call_ai_with_retry(
+                    model=MODEL_BRAIN,
+                    messages=messages,
+                    request_timeout=90
+                )
+                ai_text = resp.choices[0].message.content
+            except Exception as e:
+                print(f"{Fore.RED}[Agent] AI调用失败: {e}{Style.RESET_ALL}")
+                break
 
-        done_match = stop_pattern.search(ai_text)
-        tool_matches = tool_pattern.findall(ai_text)
+            messages.append({"role": "assistant", "content": ai_text})
 
-        # 先显示AI的文字回复（去掉工具调用和DONE标记）
-        display_text = ai_text
-        for tool_name, tool_body in tool_matches:
-            display_text = display_text.replace(f"[TOOL:{tool_name}] {tool_body}", "")
-        if done_match:
-            display_text = display_text.replace("[DONE]", "")
-        display_text = display_text.strip()
-        if display_text:
-            print(f"\n{Fore.LIGHTGREEN_EX}[Agent] AI > {Style.RESET_ALL}{display_text}")
+            # 解析AI回复中的工具调用
+            tool_pattern = re.compile(r'\[TOOL:(\w+)\]\s*(.*?)(?=\[TOOL:|\[DONE\]|$)', re.DOTALL)
+            stop_pattern = re.compile(r'\[DONE\]')
 
-        if done_match and not tool_matches:
-            # 没有工具调用，直接结束
-            print(f"\n{Fore.GREEN}[Agent] 对话结束{Style.RESET_ALL}")
-            break
+            done_match = stop_pattern.search(ai_text)
+            tool_matches = tool_pattern.findall(ai_text)
 
-        # 执行工具调用（逐个执行，每次执行后把结果加入对话）
-        for tool_name, tool_body in tool_matches:
-            tool_body = tool_body.strip()
-            print(f"\n{Fore.YELLOW}[Agent] 执行工具: {tool_name}...{Style.RESET_ALL}")
+            # 先显示AI的文字回复（去掉工具调用和DONE标记）
+            display_text = ai_text
+            for tool_name, tool_body in tool_matches:
+                display_text = display_text.replace(f"[TOOL:{tool_name}] {tool_body}", "")
+            if done_match:
+                display_text = display_text.replace("[DONE]", "")
+            display_text = display_text.strip()
+            if display_text:
+                print(f"\n{Fore.LIGHTGREEN_EX}[Agent] AI > {Style.RESET_ALL}{display_text}")
 
-            tool_result = ""
+            if done_match and not tool_matches:
+                # 纯DONE，无工具，结束
+                print(f"\n{Fore.GREEN}[Agent] 对话结束{Style.RESET_ALL}")
+                task_done = True
+                break
 
-            if tool_name == "search_knowledge":
-                tool_result = _agent_search_knowledge(tool_body)
-            elif tool_name == "read_file":
-                tool_result = _agent_read_file(tool_body)
-            elif tool_name == "list_files":
-                tool_result = _agent_list_files(tool_body)
-            elif tool_name == "delete_file":
-                tool_result = await _agent_delete_file(tool_body)
-            elif tool_name == "update_file":
-                # 格式: 相对路径\n---新内容---
-                parts = tool_body.split('\n', 1)
-                if len(parts) == 2:
-                    file_path = parts[0].strip()
-                    content = parts[1].strip()
-                    # 去掉可能的前导 --- 标记
-                    if content.startswith('---'):
-                        content = content[3:].strip()
-                    tool_result = await _agent_update_file(file_path, content)
-                else:
-                    tool_result = "update_file格式错误: 需要 相对路径\\n新内容"
-            elif tool_name == "analyze_video":
-                # 重量级操作，需要确认
-                action_desc = f"完整分析视频《{title[:30]}》(ASR+视觉帧+评论+弹幕→归档)"
-                result = await _agent_confirm("analyze_video", action_desc, "预计耗时30-90秒，消耗API配额")
-                if result == "deny":
-                    tool_result = "用户取消完整分析"
-                elif result == "ai_review":
-                    if await _agent_ai_review("analyze_video", action_desc, "完整视频分析管道"):
-                        print(f"{Fore.CYAN}[Agent] AI审查通过，开始完整视频分析...{Style.RESET_ALL}")
-                        tool_result = await _agent_analyze_video()
+            # 执行工具调用（逐个执行，每次执行后把结果加入对话）
+            for tool_name, tool_body in tool_matches:
+                tool_body = tool_body.strip()
+                print(f"\n{Fore.YELLOW}[Agent] 执行工具: {tool_name}...{Style.RESET_ALL}")
+
+                tool_result = ""
+
+                if tool_name == "search_knowledge":
+                    tool_result = _agent_search_knowledge(tool_body)
+                elif tool_name == "read_file":
+                    tool_result = _agent_read_file(tool_body)
+                elif tool_name == "list_files":
+                    tool_result = _agent_list_files(tool_body)
+                elif tool_name == "delete_file":
+                    tool_result = await _agent_delete_file(tool_body)
+                elif tool_name == "update_file":
+                    # 格式: 相对路径\n---新内容---
+                    parts = tool_body.split('\n', 1)
+                    if len(parts) == 2:
+                        file_path = parts[0].strip()
+                        content = parts[1].strip()
+                        # 去掉可能的前导 --- 标记
+                        if content.startswith('---'):
+                            content = content[3:].strip()
+                        tool_result = await _agent_update_file(file_path, content)
                     else:
-                        tool_result = "AI审查不通过，取消完整分析"
+                        tool_result = "update_file格式错误: 需要 相对路径\\n新内容"
+                elif tool_name == "analyze_video":
+                    # 重量级操作，需要确认
+                    action_desc = f"完整分析视频《{title[:30]}》(ASR+视觉帧+评论+弹幕→归档)"
+                    result = await _agent_confirm("analyze_video", action_desc, "预计耗时30-90秒，消耗API配额")
+                    if result == "deny":
+                        tool_result = "用户取消完整分析"
+                    elif result == "ai_review":
+                        if await _agent_ai_review("analyze_video", action_desc, "完整视频分析管道"):
+                            print(f"{Fore.CYAN}[Agent] AI审查通过，开始完整视频分析...{Style.RESET_ALL}")
+                            tool_result = await _agent_analyze_video()
+                        else:
+                            tool_result = "AI审查不通过，取消完整分析"
+                    else:
+                        print(f"{Fore.CYAN}[Agent] 开始完整视频分析...{Style.RESET_ALL}")
+                        tool_result = await _agent_analyze_video()
+                elif tool_name == "fetch_subtitles":
+                    tool_result = await _agent_fetch_subtitles()
+                elif tool_name == "quick_preview":
+                    tool_result = await _agent_quick_preview()
+                elif tool_name == "open_file":
+                    tool_result = await _agent_open_file(tool_body)
                 else:
-                    print(f"{Fore.CYAN}[Agent] 开始完整视频分析...{Style.RESET_ALL}")
-                    tool_result = await _agent_analyze_video()
-            elif tool_name == "fetch_subtitles":
-                tool_result = await _agent_fetch_subtitles()
-            elif tool_name == "quick_preview":
-                tool_result = await _agent_quick_preview()
-            elif tool_name == "open_file":
-                tool_result = await _agent_open_file(tool_body)
+                    tool_result = f"未知工具: {tool_name}"
+
+                # 显示工具结果
+                result_preview = tool_result[:500] + ("..." if len(tool_result) > 500 else "")
+                print(f"{Fore.GREEN}[Agent] 工具结果: {result_preview}{Style.RESET_ALL}")
+
+                # 把工具结果作为system消息加入对话
+                context_note = f"[工具 {tool_name} 执行结果]:\n{tool_result}"
+                # 根据已执行工具附加状态提示
+                if tool_name == "fetch_subtitles" and not tool_result.startswith("[无字幕]") and not tool_result.startswith("[字幕获取失败]"):
+                    context_note += f"\n\n[数据上下文] 已获取完整字幕({len(tool_result)}字)。下一步通常调用 analyze_video 做评分归档，或直接基于字幕回答用户问题。请勿再次调用 fetch_subtitles。"
+                elif tool_name == "analyze_video":
+                    context_note += "\n\n[数据上下文] 视频完整分析已完成（含字幕+评论+弹幕+AI评分+归档）。可以基于这些结果回复用户，或按用户要求生成总结/写文件。"
+                context_note += "\n\n请基于以上结果继续回复用户，如需更多工具可继续调用。"
+                messages.append({
+                    "role": "system",
+                    "content": context_note
+                })
+
+            # 工具执行完毕，决定下一步
+            if done_match:
+                # DONE + 工具已执行（如 open_file 后标 DONE）
+                print(f"\n{Fore.GREEN}[Agent] 任务完成{Style.RESET_ALL}")
+                task_done = True
+                break
+
+            if tool_matches:
+                # 还有工作没做完 → 自动继续
+                print(f"\n{Fore.CYAN}[Agent] 自动继续...{Style.RESET_ALL}")
+                messages.append({"role": "user", "content": "[系统自动继续] 请基于工具结果继续执行下一步，无需等待用户输入。如果所有步骤已完成，输出 [DONE]。"})
+                # 不 break，回到 inner while 顶部继续调 AI
             else:
-                tool_result = f"未知工具: {tool_name}"
+                # 无工具调用，回到等待用户输入
+                break
 
-            # 显示工具结果
-            result_preview = tool_result[:500] + ("..." if len(tool_result) > 500 else "")
-            print(f"{Fore.GREEN}[Agent] 工具结果: {result_preview}{Style.RESET_ALL}")
-
-            # 把工具结果作为system消息加入对话
-            context_note = f"[工具 {tool_name} 执行结果]:\n{tool_result}"
-            # 根据已执行工具附加状态提示
-            if tool_name == "fetch_subtitles" and not tool_result.startswith("[无字幕]") and not tool_result.startswith("[字幕获取失败]"):
-                context_note += f"\n\n[数据上下文] 已获取完整字幕({len(tool_result)}字)。下一步通常调用 analyze_video 做评分归档，或直接基于字幕回答用户问题。请勿再次调用 fetch_subtitles。"
-            elif tool_name == "analyze_video":
-                context_note += "\n\n[数据上下文] 视频完整分析已完成（含字幕+评论+弹幕+AI评分+归档）。可以基于这些结果回复用户，或按用户要求生成总结/写文件。"
-            context_note += "\n\n请基于以上结果继续回复用户，如需更多工具可继续调用。"
-            messages.append({
-                "role": "system",
-                "content": context_note
-            })
-
-        # 如果有工具调用且没有DONE标记，自动继续调用AI（不等用户输入）
-        if tool_matches and not done_match:
-            print(f"\n{Fore.CYAN}[Agent] 自动继续...{Style.RESET_ALL}")
-            # 不回到 input()，直接用 while 循环顶部逻辑再调AI
-            # 伪造一个空用户消息让循环继续
-            messages.append({"role": "user", "content": "[系统自动继续] 请基于工具结果继续执行下一步，无需等待用户输入。如果所有步骤已完成，输出 [DONE]。"})
-            continue
-
-        if done_match:
-            print(f"\n{Fore.GREEN}[Agent] 任务完成，对话结束{Style.RESET_ALL}")
+        # 内层循环结束
+        if task_done:
             break
 
-    if turn >= MAX_TURNS:
+    if not task_done and turn >= MAX_TURNS:
         print(f"\n{Fore.YELLOW}[Agent] 达到最大对话轮次 ({MAX_TURNS})，自动退出{Style.RESET_ALL}")
 
     print(f"\n{Fore.LIGHTMAGENTA_EX}+============================================================+{Style.RESET_ALL}")
