@@ -12716,7 +12716,16 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
 - 分析完成后 → 根据用户要求输出总结/写文件/打开文件
 - 用户如中途要调整方向（如只总结某部分/改输出格式），在上一步完成后提出来即可
 - 不要用 quick_preview 替代 fetch_subtitles（quick_preview 不看视频内容！）
-- 写文件后如果用户要求打开，用 [TOOL:open_file] 绝对路径 打开它"""},
+- 写文件后如果用户要求打开，用 [TOOL:open_file] 绝对路径 打开它
+
+自动连续模式（重要！）：
+- 用户一句话包含了"分析+总结+写桌面+打开"这种多步需求时，你在同一轮回复中依次列出所有 [TOOL:] 步骤
+- 例如用户说"帮我分析视频总结到桌面并打开" → 你回复:
+  好的，我来一步到位：
+  [TOOL:fetch_subtitles]
+  （系统会自动继续执行后续工具，你只需列出第一步）
+- 如果工具执行结果返回后任务未完成，系统会自动再次调用你继续，无需等待用户输入
+- 所有步骤完成后输出 [DONE] 结束"""},
     ]
 
     # ── Agent 确认函数：4选1（本次允许 / 一直允许 / 不允许 / AI审查） ──
@@ -13202,6 +13211,25 @@ AI判断: {thought}
         # 添加用户消息
         messages.append({"role": "user", "content": user_msg})
 
+        # 首轮意图检测：如果用户明确要求分析/总结/写桌面/打开，自动白名单相关工具
+        if turn == 1:
+            intent_keywords = {
+                "分析": ["fetch_subtitles", "analyze_video"],
+                "总结": ["fetch_subtitles", "analyze_video", "update_file"],
+                "桌面": ["update_file", "open_file"],
+                "打开": ["open_file"],
+                "md": ["update_file"],
+                "markdown": ["update_file"],
+                "写": ["update_file"],
+                "输出": ["update_file"],
+            }
+            for kw, tools in intent_keywords.items():
+                if kw in user_msg:
+                    for t in tools:
+                        auto_allow_tools.add(t)
+            if auto_allow_tools:
+                print(f"{Fore.CYAN}[Agent] 检测到意图关键词，自动放行工具: {', '.join(auto_allow_tools)}{Style.RESET_ALL}")
+
         # 调用AI
         print(f"{Fore.CYAN}[Agent] AI思考中...{Style.RESET_ALL}")
         try:
@@ -13307,10 +13335,13 @@ AI判断: {thought}
                 "content": context_note
             })
 
-        # 如果有工具调用且没有DONE标记，让AI继续思考
+        # 如果有工具调用且没有DONE标记，自动继续调用AI（不等用户输入）
         if tool_matches and not done_match:
-            # AI会自动在下一次循环中基于工具结果回复
-            pass
+            print(f"\n{Fore.CYAN}[Agent] 自动继续...{Style.RESET_ALL}")
+            # 不回到 input()，直接用 while 循环顶部逻辑再调AI
+            # 伪造一个空用户消息让循环继续
+            messages.append({"role": "user", "content": "[系统自动继续] 请基于工具结果继续执行下一步，无需等待用户输入。如果所有步骤已完成，输出 [DONE]。"})
+            continue
 
         if done_match:
             print(f"\n{Fore.GREEN}[Agent] 任务完成，对话结束{Style.RESET_ALL}")
