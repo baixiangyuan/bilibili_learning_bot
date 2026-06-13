@@ -12641,6 +12641,11 @@ AGENT_TOOLS_HELP = """你拥有以下工具能力，在回复中使用 [TOOL:工
    只看标题/简介/评论/弹幕，不做完整视频分析，快速了解视频热度/反馈
    **不获取视频字幕/内容！想分析内容先调用 fetch_subtitles。**
 
+9. [TOOL:open_file] 文件绝对路径
+   用系统默认程序打开任意文件（md→记事本/Typora, html→浏览器 等）
+   例: [TOOL:open_file] C:\\Users\\用户名\\Desktop\\视频总结.md
+   **仅在update_file写文件成功后使用。路径必须用双反斜杠 \\\\ 分隔。**
+
 [DONE] 完成任务后输出此标记结束对话
 
 工作流程：
@@ -12710,7 +12715,8 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
 - 拿到字幕后 → 调用 [TOOL:analyze_video] 做完整评分分析（含评论弹幕+AI决策+归档）
 - 分析完成后 → 根据用户要求输出总结/写文件/打开文件
 - 用户如中途要调整方向（如只总结某部分/改输出格式），在上一步完成后提出来即可
-- 不要用 quick_preview 替代 fetch_subtitles（quick_preview 不看视频内容！）"""},
+- 不要用 quick_preview 替代 fetch_subtitles（quick_preview 不看视频内容！）
+- 写文件后如果用户要求打开，用 [TOOL:open_file] 绝对路径 打开它"""},
     ]
 
     # ── Agent 确认函数：4选1（本次允许 / 一直允许 / 不允许 / AI审查） ──
@@ -12925,6 +12931,27 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
             return f"已{action}: {rel_path} ({len(new_content)}字)"
         except Exception as e:
             return f"写入失败: {e}"
+
+    async def _agent_open_file(file_path: str):
+        """用系统默认程序打开文件"""
+        import subprocess, platform
+        fp = file_path.strip()
+        if not os.path.isabs(fp):
+            # 尝试在桌面找
+            desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+            fp = os.path.join(desktop, fp)
+        if not os.path.exists(fp):
+            return f"文件不存在: {fp}"
+        try:
+            if platform.system() == "Windows":
+                os.startfile(fp)
+            elif platform.system() == "Darwin":
+                subprocess.run(["open", fp])
+            else:
+                subprocess.run(["xdg-open", fp])
+            return f"已用系统默认程序打开: {fp}"
+        except Exception as e:
+            return f"打开失败: {e}"
 
     async def _agent_fetch_subtitles():
         """获取视频字幕（AI字幕优先，CC字幕备选），缓存结果供后续分析复用"""
@@ -13258,6 +13285,8 @@ AI判断: {thought}
                 tool_result = await _agent_fetch_subtitles()
             elif tool_name == "quick_preview":
                 tool_result = await _agent_quick_preview()
+            elif tool_name == "open_file":
+                tool_result = await _agent_open_file(tool_body)
             else:
                 tool_result = f"未知工具: {tool_name}"
 
