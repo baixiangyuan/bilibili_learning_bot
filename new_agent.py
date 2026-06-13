@@ -12974,8 +12974,10 @@ async def _agent_video_analysis(brain, bvid, title, up_name, video_url, aid=0):
         subtitle_text = ""
         try:
             # 优先直接获取B站AI/CC字幕（快，不走LLM）
-            subs = await brain.fetch_bilibili_subtitles(bvid)
-            if subs and len(subs) > 100:
+            # fetch_bilibili_subtitles 是模块级函数，返回 (success, content, desc)
+            cookies = getattr(brain, 'cookies', None)
+            ok, subs, _desc = await fetch_bilibili_subtitles(bvid, cookies)
+            if ok and subs and len(subs) > 100:
                 subtitle_text = subs
                 print(f"{Fore.GREEN}[Agent] 获取到B站字幕 ({len(subs)}字){Style.RESET_ALL}")
             else:
